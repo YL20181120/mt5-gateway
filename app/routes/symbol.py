@@ -2,11 +2,19 @@ import logging
 
 from flasgger import swag_from
 from flask import Blueprint, jsonify, request
+from services.errors import ServiceError
+from services.symbol import (
+    get_symbol_info as get_symbol_info_service,
+)
+from services.symbol import (
+    get_symbol_tick as get_symbol_tick_service,
+)
+from services.symbol import (
+    list_symbols as list_symbols_service,
+)
 
 from decorators import require_mt5_connection
 from errors import internal_error_response, not_found_response
-from lib import invalidate_symbol, validate_symbol
-from mt5_connection import mt5
 
 symbol_bp = Blueprint("symbol", __name__)
 logger = logging.getLogger(__name__)
@@ -43,13 +51,7 @@ def get_symbols_endpoint():
     """
     try:
         search = request.args.get("search", "*")
-        symbols = mt5.symbols_get(group=search)
-
-        if symbols is None:
-            return jsonify({"total": 0, "symbols": []}), 200
-
-        symbol_names = [s.name for s in symbols]
-        return jsonify({"total": len(symbol_names), "symbols": sorted(symbol_names)})
+        return jsonify(list_symbols_service(search))
 
     except Exception as e:
         return internal_error_response("get_symbols", e)
@@ -85,19 +87,12 @@ def get_symbol_info_tick_endpoint(symbol):
     description: Retrieve the latest tick information for a given symbol.
     """
     try:
-        if not validate_symbol(symbol):
-            return not_found_response("symbol (not found or not selectable)", symbol)
+        return jsonify(get_symbol_tick_service(symbol))
 
-        tick = mt5.symbol_info_tick(symbol)
-        if tick is None:
-            # A cached symbol returning no tick may have dropped from Market
-            # Watch (e.g. terminal restart); evict so the next request
-            # re-selects it, preserving the previous self-healing behaviour.
-            invalidate_symbol(symbol)
-            return not_found_response("symbol tick info", symbol)
-
-        return jsonify(tick._asdict())
-
+    except ServiceError as e:
+        if e.status == 404:
+            return not_found_response(e.details.get("resource", "symbol tick info"), symbol)
+        return internal_error_response("get_symbol_info_tick", e)
     except Exception as e:
         return internal_error_response("get_symbol_info_tick", e)
 
@@ -132,15 +127,11 @@ def get_symbol_info(symbol):
     description: Retrieve detailed information for a given symbol.
     """
     try:
-        if not validate_symbol(symbol):
-            return not_found_response("symbol (not found or not selectable)", symbol)
+        return jsonify(get_symbol_info_service(symbol))
 
-        symbol_info = mt5.symbol_info(symbol)
-        if symbol_info is None:
-            invalidate_symbol(symbol)
-            return not_found_response("symbol info", symbol)
-
-        return jsonify(symbol_info._asdict())
-
+    except ServiceError as e:
+        if e.status == 404:
+            return not_found_response(e.details.get("resource", "symbol info"), symbol)
+        return internal_error_response("get_symbol_info", e)
     except Exception as e:
         return internal_error_response("get_symbol_info", e)

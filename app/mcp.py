@@ -5,8 +5,62 @@ from dataclasses import dataclass
 from typing import Any
 
 from flask import Blueprint, Response, current_app, request
+from services import account as account_service
+from services import symbol as symbol_service
+from services.errors import ServiceError
+from services.history import (
+    copy_ticks_range,
+    get_deal,
+    get_deals,
+    get_deals_range,
+    get_order,
+    get_orders,
+)
+from services.market import fetch_data_pos, fetch_data_range
+from services.operational import get_last_error, reconcile_account
+from services.order_calculations import calculate_margin, calculate_profit
+from services.order_check import check_order
+from services.order_execution import send_order
+from services.order_modify import modify_order as modify_pending_order
+from services.pending_orders import cancel_order as cancel_pending_order
+from services.pending_orders import list_pending_orders
+from services.position_close import close_one, close_partial
+from services.position_controls import close_all, modify_sl_tp
+from services.positions import get_open_positions, get_positions_total
+
+from mt5_connection import MT5Connection
 
 mcp_bp = Blueprint("mcp", __name__)
+_SUPPORTED_PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
+_SERVICE_HANDLERS = {
+    "get_account": account_service.get_account_info,
+    "list_symbols": symbol_service.list_symbols,
+    "get_symbol_info": symbol_service.get_symbol_info,
+    "get_symbol_tick": symbol_service.get_symbol_tick,
+    "get_bars": fetch_data_pos,
+    "get_bars_range": fetch_data_range,
+    "get_positions": get_open_positions,
+    "get_positions_total": get_positions_total,
+    "get_deal": get_deal,
+    "get_historical_order": get_order,
+    "get_deals": get_deals,
+    "get_historical_orders": get_orders,
+    "get_deals_range": get_deals_range,
+    "copy_ticks_range": copy_ticks_range,
+    "calculate_margin": calculate_margin,
+    "calculate_profit": calculate_profit,
+    "check_order": check_order,
+    "get_pending_orders": list_pending_orders,
+    "cancel_order": cancel_pending_order,
+    "modify_order": lambda ticket, **data: modify_pending_order(ticket, data),
+    "close_position": lambda position: close_one(position),
+    "close_position_partial": close_partial,
+    "close_all_positions": lambda order_type="all", magic=None: close_all(order_type, magic),
+    "modify_position_sl_tp": modify_sl_tp,
+    "place_order": lambda idempotency_key=None, **data: send_order(data, idempotency_key)["payload"],
+    "reconcile": reconcile_account,
+    "get_last_error": get_last_error,
+}
 
 
 @dataclass(frozen=True)
@@ -72,17 +126,49 @@ def _jsonrpc(payload: dict[str, Any], status: int = 200) -> Response:
     response = Response(json.dumps(payload, ensure_ascii=False), status=status)
     response.content_type = "application/json"
     response.headers["X-Skip-Response-Envelope"] = "1"
+    response.headers["MCP-Protocol-Version"] = _SUPPORTED_PROTOCOL_VERSIONS[0]
     return response
 
 
 def _schema(tool: Tool) -> dict[str, Any]:
-    return {"type": "object", "properties": tool.properties, "required": list(tool.required)}
+    return {
+        "type": "object",
+        "properties": tool.properties,
+        "required": list(tool.required),
+        "additionalProperties": False,
+    }
 
 
 def _invoke(tool: Tool, arguments: dict[str, Any]) -> dict[str, Any]:
     missing = [name for name in tool.required if name not in arguments]
     if missing:
         return {"error": f"missing required arguments: {', '.join(missing)}"}
+    unknown = sorted(set(arguments) - set(tool.properties))
+    if unknown:
+        return {"error": f"unknown arguments: {', '.join(unknown)}"}
+    service_handler = _SERVICE_HANDLERS.get(tool.name)
+    if service_handler is not None:
+        connection = MT5Connection.get_instance()
+        if not connection.ensure_connection():
+            return {
+                "status": 503,
+                "data": {
+                    "error": "MT5 unavailable",
+                    "error_type": "connection_error",
+                    "mt5_status": connection.get_status().value,
+                    "detail": connection.get_last_error(),
+                },
+            }
+        try:
+            result = service_handler(**arguments)
+            if isinstance(result, tuple) and len(result) == 2:
+                return {"status": result[1], "data": result[0]}
+            return {"status": 200, "data": result}
+        except ServiceError as error:
+            data = {"error": error.message, "error_type": error.error_type}
+            if error.details:
+                data.update(error.details)
+            return {"status": error.status, "data": data}
     path = tool.path.format(**{name: arguments[name] for name in tool.path_fields})
     query = {name: arguments[name] for name in tool.query_fields if name in arguments}
     body = {name: value for name, value in arguments.items() if name not in tool.query_fields and name not in tool.path_fields and name != "idempotency_key"}
@@ -104,15 +190,31 @@ def _invoke(tool: Tool, arguments: dict[str, Any]) -> dict[str, Any]:
         return {"status": response.status_code, "data": data}
 
 
-@mcp_bp.post("/mcp")
+@mcp_bp.route("/mcp", methods=["POST", "GET", "DELETE"])
 def mcp_endpoint():
+    if request.method == "GET":
+        response = Response(status=405)
+        response.headers["Allow"] = "POST, GET"
+        return response
+    if request.method == "DELETE":
+        response = Response(status=405)
+        response.headers["Allow"] = "POST, GET"
+        return response
+    accept = request.headers.get("Accept", "")
+    if accept and not any(value in accept for value in ("application/json", "text/event-stream", "*/*")):
+        return _jsonrpc({"jsonrpc": "2.0", "id": None, "error": {"code": -32000, "message": "Accept must include application/json or text/event-stream"}}, 406)
     message = request.get_json(silent=True)
     if not isinstance(message, dict) or message.get("jsonrpc") != "2.0":
         return _jsonrpc({"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid Request"}})
     request_id = message.get("id")
     method = message.get("method")
     if method == "initialize":
-        return _jsonrpc({"jsonrpc": "2.0", "id": request_id, "result": {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}}, "serverInfo": {"name": "mt5-gateway", "version": "1"}}})
+        params = message.get("params", {})
+        requested_version = params.get("protocolVersion") if isinstance(params, dict) else None
+        version = requested_version if requested_version in _SUPPORTED_PROTOCOL_VERSIONS else _SUPPORTED_PROTOCOL_VERSIONS[0]
+        response = _jsonrpc({"jsonrpc": "2.0", "id": request_id, "result": {"protocolVersion": version, "capabilities": {"tools": {}}, "serverInfo": {"name": "mt5-gateway", "version": "1"}}})
+        response.headers["MCP-Protocol-Version"] = version
+        return response
     if method == "notifications/initialized":
         return Response(status=202)
     if method == "tools/list":

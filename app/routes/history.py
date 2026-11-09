@@ -1,10 +1,15 @@
-import logging
-from datetime import datetime
-
 from flasgger import swag_from
 from flask import Blueprint, jsonify, request
+from services.errors import ServiceError
+from services.history import (
+    copy_ticks_range,
+    get_deal,
+    get_deals,
+    get_deals_range,
+    get_order,
+    get_orders,
+)
 
-from deal_window import DealWindowError, parse_deal_window
 from decorators import require_mt5_connection
 from errors import (
     internal_error_response,
@@ -12,12 +17,9 @@ from errors import (
     not_found_response,
     validation_error_response,
 )
-from lib import get_deal_from_ticket, get_order_from_ticket
-from mt5_connection import mt5
-from request_limits import validate_date_range, validate_tick_flags
+from mt5_connection import mt5  # noqa: F401
 
 history_bp = Blueprint("history", __name__)
-logger = logging.getLogger(__name__)
 
 
 @history_bp.route("/get_deal_from_ticket", methods=["GET"])
@@ -52,20 +54,14 @@ def get_deal_from_ticket_endpoint():
     description: Retrieve deal information associated with a specific position ticket number.
     """
     try:
-        ticket = request.args.get("ticket")
-        if not ticket:
-            return validation_error_response("Ticket parameter is required")
+        return jsonify(get_deal(request.args.get("ticket")))
 
-        try:
-            ticket = int(ticket)
-        except ValueError:
-            return validation_error_response("Invalid ticket format")
-
-        deal = get_deal_from_ticket(ticket)
-        if deal is None:
-            return not_found_response("deal", ticket)
-
-        return jsonify(deal)
+    except ServiceError as error:
+        if error.status == 400:
+            return validation_error_response(error.message)
+        if error.status == 404:
+            return not_found_response("deal", request.args.get("ticket"))
+        return internal_error_response("get_deal_from_ticket", error)
 
     except Exception as e:
         return internal_error_response("get_deal_from_ticket", e)
@@ -103,20 +99,14 @@ def get_order_from_ticket_endpoint():
     description: Retrieve order information associated with a specific ticket number.
     """
     try:
-        ticket = request.args.get("ticket")
-        if not ticket:
-            return validation_error_response("Ticket parameter is required")
+        return jsonify(get_order(request.args.get("ticket")))
 
-        try:
-            ticket = int(ticket)
-        except ValueError:
-            return validation_error_response("Invalid ticket format")
-
-        order = get_order_from_ticket(ticket)
-        if order is None:
-            return not_found_response("order", ticket)
-
-        return jsonify(order)
+    except ServiceError as error:
+        if error.status == 400:
+            return validation_error_response(error.message)
+        if error.status == 404:
+            return not_found_response("order", request.args.get("ticket"))
+        return internal_error_response("get_order_from_ticket", error)
 
     except Exception as e:
         return internal_error_response("get_order_from_ticket", e)
@@ -173,34 +163,23 @@ def history_deals_get_endpoint():
     description: Retrieve historical deals within a date range, optionally filtered to one position.
     """
     try:
-        try:
-            from_timestamp, to_timestamp, position = parse_deal_window(request.args)
-        except DealWindowError as e:
-            return validation_error_response(str(e))
-
-        if position is not None:
-            # MT5 ignores `position` when a date range is also passed and returns
-            # every deal in the range; query by position and apply the window here.
-            deals = mt5.history_deals_get(position=position)
-            if deals is not None:
-                deals = [
-                    deal
-                    for deal in deals
-                    if from_timestamp <= deal.time <= to_timestamp
-                ]
-        else:
-            deals = mt5.history_deals_get(from_timestamp, to_timestamp)
-
-        if deals is None:
-            return mt5_connection_error_response(
-                "Get deals history", mt5.last_call_error()
+        return jsonify(
+            get_deals(
+                request.args.get("from_date"),
+                request.args.get("to_date"),
+                request.args.get("position"),
             )
-
-        deals_list = [deal._asdict() for deal in deals]
-        return jsonify(deals_list)
-
-    except Exception as e:
-        return internal_error_response("history_deals_get", e)
+        )
+    except ServiceError as error:
+        if error.status == 400:
+            return validation_error_response(error.message)
+        if error.status == 503:
+            return mt5_connection_error_response(
+                "Get deals history", error.details.get("mt5_error")
+            )
+        return internal_error_response("history_deals_get", error)
+    except Exception as error:
+        return internal_error_response("history_deals_get", error)
 
 
 @history_bp.route("/history_orders_get", methods=["GET"])
@@ -238,26 +217,17 @@ def history_orders_get_endpoint():
     description: Retrieve historical orders associated with a specific ticket number.
     """
     try:
-        ticket = request.args.get("ticket")
-        if not ticket:
-            return validation_error_response("Ticket parameter is required")
-
-        try:
-            ticket = int(ticket)
-        except ValueError:
-            return validation_error_response("Invalid ticket format")
-
-        orders = mt5.history_orders_get(ticket=ticket)
-        if orders is None:
+        return jsonify(get_orders(request.args.get("ticket")))
+    except ServiceError as error:
+        if error.status == 400:
+            return validation_error_response(error.message)
+        if error.status == 503:
             return mt5_connection_error_response(
-                "Get orders history", mt5.last_call_error()
+                "Get orders history", error.details.get("mt5_error")
             )
-
-        orders_list = [order._asdict() for order in orders]
-        return jsonify(orders_list)
-
-    except Exception as e:
-        return internal_error_response("history_orders_get", e)
+        return internal_error_response("history_orders_get", error)
+    except Exception as error:
+        return internal_error_response("history_orders_get", error)
 
 
 @history_bp.route("/history_deals_range", methods=["GET"])
@@ -310,52 +280,23 @@ def history_deals_range_endpoint():
     description: Retrieve historical deals within a date range without requiring a position ticket.
     """
     try:
-        from_date = request.args.get("from_date")
-        to_date = request.args.get("to_date")
-        magic_raw = request.args.get("magic")
-
-        if not from_date or not to_date:
-            return validation_error_response(
-                "from_date and to_date parameters are required"
+        return jsonify(
+            get_deals_range(
+                request.args.get("from_date"),
+                request.args.get("to_date"),
+                request.args.get("magic"),
             )
-
-        try:
-            from_dt = datetime.fromisoformat(from_date.replace("Z", "+00:00"))
-            to_dt = datetime.fromisoformat(to_date.replace("Z", "+00:00"))
-        except ValueError as e:
-            return validation_error_response(f"Invalid date format: {str(e)}")
-
-        if from_dt >= to_dt:
-            return validation_error_response("from_date must be before to_date")
-        try:
-            validate_date_range(from_dt, to_dt)
-        except ValueError as error:
-            return validation_error_response(str(error))
-
-        magic = None
-        if magic_raw is not None:
-            try:
-                magic = int(magic_raw)
-            except ValueError:
-                return validation_error_response("Invalid magic format")
-
-        from_ts = int(from_dt.timestamp())
-        to_ts = int(to_dt.timestamp())
-        deals = mt5.history_deals_get(from_ts, to_ts)
-
-        if deals is None:
+        )
+    except ServiceError as error:
+        if error.status == 400:
+            return validation_error_response(error.message)
+        if error.status == 503:
             return mt5_connection_error_response(
-                "Get deals history range", mt5.last_call_error()
+                "Get deals history range", error.details.get("mt5_error")
             )
-
-        deals_list = [d._asdict() for d in deals]
-        if magic is not None:
-            deals_list = [d for d in deals_list if d.get("magic") == magic]
-
-        return jsonify(deals_list)
-
-    except Exception as e:
-        return internal_error_response("history_deals_range", e)
+        return internal_error_response("history_deals_range", error)
+    except Exception as error:
+        return internal_error_response("history_deals_range", error)
 
 
 @history_bp.route("/copy_ticks_range", methods=["GET"])
@@ -410,61 +351,21 @@ def copy_ticks_range_endpoint():
     description: Retrieve raw tick data for a symbol within a date range.
     """
     try:
-        symbol = request.args.get("symbol")
-        from_date = request.args.get("from_date")
-        to_date = request.args.get("to_date")
-        flags_raw = request.args.get("flags")
-
-        if not symbol or not from_date or not to_date:
-            return validation_error_response(
-                "symbol, from_date, to_date parameters are required"
+        return jsonify(
+            copy_ticks_range(
+                request.args.get("symbol"),
+                request.args.get("from_date"),
+                request.args.get("to_date"),
+                request.args.get("flags"),
             )
-
-        try:
-            from_dt = datetime.fromisoformat(from_date.replace("Z", "+00:00"))
-            to_dt = datetime.fromisoformat(to_date.replace("Z", "+00:00"))
-        except ValueError as e:
-            return validation_error_response(f"Invalid date format: {str(e)}")
-
-        if from_dt >= to_dt:
-            return validation_error_response("from_date must be before to_date")
-        try:
-            validate_date_range(from_dt, to_dt)
-        except ValueError as error:
-            return validation_error_response(str(error))
-
-        flags = mt5.COPY_TICKS_ALL
-        if flags_raw is not None:
-            try:
-                flags = validate_tick_flags(flags_raw)
-            except ValueError:
-                return validation_error_response("Invalid flags format")
-
-        ticks = mt5.copy_ticks_range(symbol, from_dt, to_dt, flags)
-        if ticks is None:
+        )
+    except ServiceError as error:
+        if error.status == 400:
+            return validation_error_response(error.message)
+        if error.status == 503:
             return mt5_connection_error_response(
-                "Copy ticks range", mt5.last_call_error()
+                "Copy ticks range", error.details.get("mt5_error")
             )
-
-        ticks_list = []
-        for t in ticks:
-            row = {
-                "time": int(t["time"]),
-                "bid": float(t["bid"]),
-                "ask": float(t["ask"]),
-            }
-            names = t.dtype.names if hasattr(t, "dtype") else ()
-            if "time_msc" in names:
-                row["time_msc"] = int(t["time_msc"])
-            if "last" in names:
-                row["last"] = float(t["last"])
-            if "volume" in names:
-                row["volume"] = int(t["volume"])
-            if "flags" in names:
-                row["flags"] = int(t["flags"])
-            ticks_list.append(row)
-
-        return jsonify(ticks_list)
-
-    except Exception as e:
-        return internal_error_response("copy_ticks_range", e)
+        return internal_error_response("copy_ticks_range", error)
+    except Exception as error:
+        return internal_error_response("copy_ticks_range", error)

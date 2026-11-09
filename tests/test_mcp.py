@@ -10,13 +10,15 @@ def _rpc(client, method, request_id=1, params=None):
     return client.post("/mcp", json=payload)
 
 
-def test_mcp_initialize_and_list_tools():
+def test_mcp_initialize_and_list_tools(monkeypatch):
+    monkeypatch.setenv("API_KEY", "")
     application = app_module.create_app(start_mt5=False)
     client = application.test_client()
 
     initialized = _rpc(client, "initialize")
     assert initialized.status_code == 200
     assert initialized.json["result"]["capabilities"]["tools"] == {}
+    assert initialized.headers["MCP-Protocol-Version"] == "2025-06-18"
 
     listed = _rpc(client, "tools/list")
     names = {tool["name"] for tool in listed.json["result"]["tools"]}
@@ -27,9 +29,28 @@ def test_mcp_initialize_and_list_tools():
         if tool["name"] == "get_account"
     )
     assert account_schema["properties"] == {}
+    assert account_schema["additionalProperties"] is False
 
 
-def test_mcp_delegates_to_existing_http_route():
+def test_mcp_supports_stateless_streamable_http_shape(monkeypatch):
+    monkeypatch.setenv("API_KEY", "")
+    application = app_module.create_app(start_mt5=False)
+    client = application.test_client()
+
+    get_response = client.get("/mcp", headers={"Accept": "text/event-stream"})
+    assert get_response.status_code == 405
+    assert get_response.headers["Allow"] == "POST, GET"
+
+    rejected = client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+        headers={"Accept": "text/plain"},
+    )
+    assert rejected.status_code == 406
+
+
+def test_mcp_delegates_to_existing_http_route(monkeypatch):
+    monkeypatch.setenv("API_KEY", "")
     application = app_module.create_app(start_mt5=False)
     client = application.test_client()
 
@@ -47,7 +68,8 @@ def test_mcp_delegates_to_existing_http_route():
     assert delegated["data"]["ok"] is True
 
 
-def test_mcp_rejects_unknown_tools():
+def test_mcp_rejects_unknown_tools(monkeypatch):
+    monkeypatch.setenv("API_KEY", "")
     application = app_module.create_app(start_mt5=False)
     client = application.test_client()
 
@@ -57,4 +79,4 @@ def test_mcp_rejects_unknown_tools():
         params={"name": "mt5_api", "arguments": {}},
     )
 
-    assert response.json["result"]["isError"] is True
+    assert response.json["error"]["code"] == -32602

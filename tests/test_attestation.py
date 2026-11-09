@@ -24,9 +24,13 @@ def _app_routes() -> set[str]:
         for route, methods in re.findall(
             r'_bp\.route\("([^"]+)"(?:,\s*methods=\[([^\]]*)\])?', text
         ):
+            if route == "/mcp":
+                continue
             for method in re.findall(r"[A-Z]+", methods) or ["GET"]:
                 found.add(f"{method} {route}")
         for method, route in re.findall(r'_bp\.(get|post|put|delete)\("([^"]+)"', text):
+            if route == "/mcp":
+                continue
             found.add(f"{method.upper()} {route}")
     return found
 

@@ -1,32 +1,19 @@
-import logging
-import math
-
-from close_confirm import confirm_close
+import services.position_close as position_close_service
 from flasgger import swag_from
 from flask import Blueprint, g, jsonify, request
+from services.errors import ServiceError
+from services.position_close import close_one, close_partial
+from services.position_controls import close_all, modify_sl_tp
+from services.positions import get_open_positions, get_positions_total
 
 from decorators import require_mt5_connection
 from errors import (
     internal_error_response,
-    mt5_error_response,
-    unknown_outcome_response,
     validation_error_response,
 )
-from lib import (
-    close_all_positions,
-    close_position,
-    get_positions,
-    get_symbol_filling_mode,
-    validate_sl_tp,
-    validate_symbol,
-    validate_volume,
-)
-from mt5_connection import mt5
-from order_requests import OrderRequestError, build_sltp_request
-from retcodes import classify_retcode
+from lib import close_position
 
 position_bp = Blueprint("position", __name__)
-logger = logging.getLogger(__name__)
 
 
 def _request_id():
@@ -63,39 +50,13 @@ def close_position_endpoint():
     description: Close a specific trading position based on the provided position data.
     """
     try:
-        data = request.get_json()
-        if not data or "position" not in data:
-            return validation_error_response("Position data is required")
-
-        result = close_position(data["position"])
-        if result is None:
-            return validation_error_response("Failed to close position")
-
-        info = classify_retcode(result.retcode)
-        if not info.is_success:
-            return mt5_error_response("Close position", result)
-
-        result_data = result._asdict()
-        fill_price_source = confirm_close(
-            result_data, int(data["position"]["ticket"]), _request_id()
-        )
-        partial = info.name == "DONE_PARTIAL"
-        result_data["partial"] = partial
-        if partial:
-            original_volume = float(data["position"].get("volume", result.volume))
-            result_data["remaining_volume"] = max(
-                0.0, original_volume - float(result.volume)
-            )
-        return jsonify(
-            {
-                "message": "Position closed successfully",
-                "result": result_data,
-                "fill_price_source": fill_price_source,
-            }
-        )
-
-    except Exception as e:
-        return internal_error_response("close_position", e)
+        position_close_service.close_position = close_position
+        data = request.get_json(silent=True) or {}
+        return jsonify(close_one(data.get("position"), _request_id()))
+    except ServiceError as error:
+        return jsonify({"error": error.message, "error_type": error.error_type, **(error.details or {})}), error.status
+    except Exception as error:
+        return internal_error_response("close_position", error)
 
 
 @position_bp.route("/position_close_partial", methods=["POST"])
@@ -130,121 +91,12 @@ def close_position_partial_endpoint():
     description: Close a specific volume of an open position, leaving the remainder open.
     """
     try:
-        data = request.get_json()
-        if not data:
-            return validation_error_response("Position data is required")
-
-        required_fields = ["ticket", "volume"]
-        if not all(field in data for field in required_fields):
-            return validation_error_response(
-                "Missing required fields", {"required": required_fields}
-            )
-
-        try:
-            ticket = int(data["ticket"])
-            volume = float(data["volume"])
-        except (TypeError, ValueError):
-            return validation_error_response("Ticket and volume must be numeric")
-        deviation = data.get("deviation", 20)
-        comment = data.get("comment", "Partial close")
-
-        if not math.isfinite(volume) or volume <= 0:
-            return validation_error_response("Volume must be positive")
-
-        positions = mt5.positions_get(ticket=ticket)
-        if positions is None or len(positions) == 0:
-            return validation_error_response(f"Position {ticket} not found")
-
-        position = positions[0]
-        symbol = position.symbol
-        position_type = position.type
-
-        if "symbol" in data and data["symbol"] != symbol:
-            return validation_error_response(f"Symbol does not match position {ticket}")
-        if "type" in data and int(data["type"]) != position_type:
-            return validation_error_response(f"Type does not match position {ticket}")
-        if not validate_symbol(symbol):
-            return validation_error_response(
-                f"Symbol not found or not selectable: {symbol}"
-            )
-        is_valid, error_msg = validate_volume(symbol, volume)
-        if not is_valid:
-            return validation_error_response(error_msg)
-
-        if volume >= position.volume:
-            return validation_error_response(
-                f"Volume to close ({volume}) must be less than position volume ({position.volume}). Use /close_position to close entire position."
-            )
-
-        tick = mt5.symbol_info_tick(symbol)
-        if tick is None:
-            return validation_error_response(f"Failed to get tick for {symbol}")
-
-        order_type_dict = {0: mt5.ORDER_TYPE_SELL, 1: mt5.ORDER_TYPE_BUY}
-
-        if position_type not in order_type_dict:
-            return validation_error_response(
-                f"Invalid position type: {position_type}. Must be 0 (BUY) or 1 (SELL)"
-            )
-
-        order_type = order_type_dict[position_type]
-
-        price = tick.bid if position_type == 0 else tick.ask
-
-        type_filling = get_symbol_filling_mode(symbol)
-
-        request_data = {
-            "action": mt5.TRADE_ACTION_DEAL,
-            "position": ticket,
-            "symbol": symbol,
-            "volume": volume,
-            "type": order_type,
-            "price": price,
-            "deviation": deviation,
-            "magic": position.magic,
-            "comment": comment,
-            "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": type_filling,
-        }
-
-        result = mt5.order_send(request_data)
-
-        if result is None:
-            logger.error(
-                f"order_send returned None for partial close of position {ticket}"
-            )
-            return unknown_outcome_response(
-                "Partial close position", mt5.last_order_error()
-            )
-
-        if not classify_retcode(result.retcode).is_success:
-            logger.error(
-                f"Failed to partially close position {ticket}: retcode={result.retcode}, comment={result.comment}"
-            )
-            return mt5_error_response("Partial close position", result)
-
-        info = classify_retcode(result.retcode)
-        result_data = result._asdict()
-        fill_price_source = confirm_close(result_data, ticket, _request_id())
-        filled_volume = float(result_data.get("volume") or volume)
-        remaining_volume = max(0.0, float(position.volume) - filled_volume)
-        logger.info(
-            f"Position {ticket} partially closed: {filled_volume} lots at {result_data.get('price')}"
-        )
-
-        return jsonify(
-            {
-                "message": "Position partially closed successfully",
-                "result": result_data,
-                "partial": info.name == "DONE_PARTIAL",
-                "remaining_volume": remaining_volume,
-                "fill_price_source": fill_price_source,
-            }
-        )
-
-    except Exception as e:
-        return internal_error_response("close_position_partial", e)
-
+        position_close_service.close_position = close_position
+        return jsonify(close_partial(request.get_json(silent=True), _request_id()))
+    except ServiceError as error:
+        return jsonify({"error": error.message, "error_type": error.error_type, **(error.details or {})}), error.status
+    except Exception as error:
+        return internal_error_response("close_position_partial", error)
 
 @position_bp.route("/close_all_positions", methods=["POST"])
 @require_mt5_connection
@@ -276,25 +128,13 @@ def close_all_positions_endpoint():
     description: Close all open trading positions based on optional filters like order type and magic number.
     """
     try:
-        data = request.get_json() or {}
-        order_type = data.get("order_type", "all")
-        magic = data.get("magic")
-
-        outcome = close_all_positions(order_type, magic)
-        if not outcome["closed"] and not outcome["failed"]:
-            return jsonify({"message": "No positions were closed"}), 200
-
-        payload = {
-            "message": (
-                f"Closed {len(outcome['closed'])} positions; "
-                f"{len(outcome['failed'])} failed"
-            ),
-            **outcome,
-        }
-        return jsonify(payload), 207 if outcome["failed"] else 200
-
-    except Exception as e:
-        return internal_error_response("close_all_positions", e)
+        data = request.get_json(silent=True) or {}
+        result = close_all(data.get("order_type", "all"), data.get("magic"))
+        return jsonify(result), 207 if result.get("failed") else 200
+    except ServiceError as error:
+        return jsonify({"error": error.message, "error_type": error.error_type, **(error.details or {})}), error.status
+    except Exception as error:
+        return internal_error_response("close_all_positions", error)
 
 
 @position_bp.route("/modify_sl_tp", methods=["POST"])
@@ -327,51 +167,11 @@ def modify_sl_tp_endpoint():
     description: Modify the Stop Loss (SL) and Take Profit (TP) levels for a specific position.
     """
     try:
-        data = request.get_json()
-        if not data or "position" not in data:
-            return validation_error_response("Position data is required")
-
-        try:
-            position = int(data["position"])
-        except (TypeError, ValueError):
-            return validation_error_response("Position must be an integer")
-        positions = mt5.positions_get(ticket=position)
-        if not positions:
-            logger.error(f"Position {position} not found for SL/TP modify")
-            return validation_error_response(f"Position {position} not found")
-
-        try:
-            request_data = build_sltp_request(data, positions[0], mt5.TRADE_ACTION_SLTP)
-        except OrderRequestError as error:
-            return validation_error_response(str(error))
-
-        current = positions[0]
-        sl = request_data["sl"] if request_data["sl"] > 0 else None
-        tp = request_data["tp"] if request_data["tp"] > 0 else None
-        is_valid, error_msg = validate_sl_tp(
-            current.type, current.price_current, sl, tp
-        )
-        if not is_valid:
-            return validation_error_response(error_msg)
-
-        result = mt5.order_send(request_data)
-
-        if result is None:
-            last_err = mt5.last_order_error()
-            logger.error(
-                f"order_send returned None for modify SL/TP position {position}, last_error={last_err}"
-            )
-            return unknown_outcome_response("Modify SL/TP", last_err)
-
-        if not classify_retcode(result.retcode).is_success:
-            return mt5_error_response("Modify SL/TP", result)
-
-        return jsonify(
-            {"message": "SL/TP modified successfully", "result": result._asdict()}
-        )
-
-    except Exception as e:
-        return internal_error_response("modify_sl_tp", e)
+        return jsonify(modify_sl_tp(request.get_json(silent=True)))
+    except ServiceError as error:
+        return jsonify({"error": error.message, "error_type": error.error_type, **(error.details or {})}), error.status
+    except Exception as error:
+        return internal_error_response("modify_sl_tp", error)
 
 
 @position_bp.route("/get_positions", methods=["GET"])
@@ -407,17 +207,10 @@ def get_positions_endpoint():
     try:
         magic = request.args.get("magic", type=int)
 
-        positions_df = get_positions(magic)
+        return jsonify(get_open_positions(magic)), 200
 
-        if positions_df is None:
-            return internal_error_response(
-                "get_positions", Exception("Failed to retrieve positions")
-            )
-
-        if positions_df.empty:
-            return jsonify([]), 200
-
-        return jsonify(positions_df.to_dict(orient="records")), 200
+    except ServiceError as error:
+        return internal_error_response("get_positions", error)
 
     except Exception as e:
         return internal_error_response("get_positions", e)
@@ -445,11 +238,12 @@ def positions_total_endpoint():
     description: Retrieve the total number of open trading positions.
     """
     try:
-        total = mt5.positions_total()
-        if total is None:
-            return validation_error_response("Failed to get positions total")
+        return jsonify(get_positions_total())
 
-        return jsonify({"total": total})
+    except ServiceError as error:
+        if error.status == 400:
+            return validation_error_response(error.message)
+        return internal_error_response("positions_total", error)
 
     except Exception as e:
         return internal_error_response("positions_total", e)
