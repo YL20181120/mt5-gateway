@@ -33,6 +33,29 @@ def test_mcp_initialize_and_list_tools(monkeypatch):
     assert account_schema["properties"] == {}
     assert account_schema["additionalProperties"] is False
 
+    sltp_tool = next(
+        tool
+        for tool in listed.json["result"]["tools"]
+        if tool["name"] == "modify_position_sl_tp"
+    )
+    assert sltp_tool["inputSchema"]["properties"]["position"]["type"] == "integer"
+    assert "idempotency_key" not in sltp_tool["inputSchema"]["properties"]
+
+    order_check_tool = next(
+        tool
+        for tool in listed.json["result"]["tools"]
+        if tool["name"] == "check_order"
+    )
+    assert {
+        "sl",
+        "tp",
+        "deviation",
+        "magic",
+        "comment",
+        "type_filling",
+        "expiration",
+    } <= set(order_check_tool["inputSchema"]["properties"])
+
 
 def test_mcp_supports_stateless_streamable_http_shape(monkeypatch):
     monkeypatch.setenv("API_KEY", "")
