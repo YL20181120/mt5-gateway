@@ -1,5 +1,7 @@
 import json
 
+import mcp as mcp_module
+
 import app as app_module
 
 
@@ -81,3 +83,54 @@ def test_mcp_rejects_unknown_tools(monkeypatch):
     )
 
     assert response.json["error"]["code"] == -32602
+
+
+def test_mcp_adapts_partial_close_arguments(monkeypatch):
+    captured = {}
+
+    def fake_close_partial(data):
+        captured.update(data)
+        return {"ok": True}
+
+    monkeypatch.setattr(mcp_module, "close_partial", fake_close_partial)
+
+    result = mcp_module._SERVICE_HANDLERS["close_position_partial"](
+        ticket=123,
+        volume=0.1,
+        deviation=20,
+        comment="test",
+    )
+
+    assert result == {"ok": True}
+    assert captured == {
+        "ticket": 123,
+        "volume": 0.1,
+        "deviation": 20,
+        "comment": "test",
+    }
+
+
+def test_mcp_adapts_request_object_services(monkeypatch):
+    calls = {}
+
+    def fake_check_order(data):
+        calls["check_order"] = data
+        return {"valid": True}
+
+    def fake_modify_sl_tp(data):
+        calls["modify_sl_tp"] = data
+        return {"ok": True}
+
+    monkeypatch.setattr(mcp_module, "check_order", fake_check_order)
+    monkeypatch.setattr(mcp_module, "modify_sl_tp", fake_modify_sl_tp)
+
+    assert mcp_module._SERVICE_HANDLERS["check_order"](
+        symbol="EURUSD", volume=0.1, type="BUY"
+    ) == {"valid": True}
+    assert mcp_module._SERVICE_HANDLERS["modify_position_sl_tp"](
+        position=123, sl=1.0, tp=2.0
+    ) == {"ok": True}
+    assert calls == {
+        "check_order": {"symbol": "EURUSD", "volume": 0.1, "type": "BUY"},
+        "modify_sl_tp": {"position": 123, "sl": 1.0, "tp": 2.0},
+    }

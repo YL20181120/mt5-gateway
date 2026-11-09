@@ -32,6 +32,23 @@ from mt5_connection import MT5Connection
 
 mcp_bp = Blueprint("mcp", __name__)
 _SUPPORTED_PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
+
+
+def _close_partial_position(**data):
+    """Adapt flat MCP arguments to the service's request-object contract."""
+    return close_partial(data)
+
+
+def _check_order(**data):
+    """Adapt flat MCP arguments to the order-check service contract."""
+    return check_order(data)
+
+
+def _modify_position_sl_tp(**data):
+    """Adapt flat MCP arguments to the position-control service contract."""
+    return modify_sl_tp(data)
+
+
 _SERVICE_HANDLERS = {
     "get_account": account_service.get_account_info,
     "list_symbols": symbol_service.list_symbols,
@@ -49,14 +66,14 @@ _SERVICE_HANDLERS = {
     "copy_ticks_range": copy_ticks_range,
     "calculate_margin": calculate_margin,
     "calculate_profit": calculate_profit,
-    "check_order": check_order,
+    "check_order": _check_order,
     "get_pending_orders": list_pending_orders,
     "cancel_order": cancel_pending_order,
     "modify_order": lambda ticket, **data: modify_pending_order(ticket, data),
     "close_position": lambda position: close_one(position),
-    "close_position_partial": close_partial,
+    "close_position_partial": _close_partial_position,
     "close_all_positions": lambda order_type="all", magic=None: close_all(order_type, magic),
-    "modify_position_sl_tp": modify_sl_tp,
+    "modify_position_sl_tp": _modify_position_sl_tp,
     "place_order": lambda idempotency_key=None, **data: send_order(data, idempotency_key)["payload"],
     "reconcile": reconcile_account,
     "get_last_error": get_last_error,
