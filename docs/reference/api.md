@@ -119,3 +119,12 @@ Routes live in `app/routes/` — one file per resource
 (`order.py`, `position.py`, `data.py`, `history.py`, `symbol.py`,
 `account.py`, `control.py`, `health.py`), each registered with the Flask
 app in `app/app.py`.
+
+## MCP
+
+The same port also exposes an MCP Streamable HTTP endpoint at `POST /mcp`. It
+uses the same bearer authentication as the HTTP API. It exposes typed tools such
+as `get_account`, `get_bars`, `place_order`, `close_position`, and `reconcile`.
+The tools call the existing business handlers directly, so HTTP clients remain
+fully supported and both surfaces share validation, idempotency, and the kill
+switch without wrapping the HTTP API as a generic MCP tool.

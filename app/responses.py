@@ -6,6 +6,9 @@ from flask import current_app, g
 def install_response_envelope(app):
     @app.after_request
     def envelope(response):
+        if response.headers.get("X-Skip-Response-Envelope") == "1":
+            response.headers.pop("X-Skip-Response-Envelope", None)
+            return response
         if not response.is_json:
             return response
         payload = response.get_json()

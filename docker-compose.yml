@@ -3,6 +3,7 @@ services:
     build:
       dockerfile: Dockerfile
     container_name: mt5-gateway
+    platform: linux/amd64
     volumes:
       - ./config:/config
     networks:

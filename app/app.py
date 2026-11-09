@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from flasgger import Swagger
 from flask import Flask
 from flask_cors import CORS
+from mcp import mcp_bp
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from autologin import load_settings, validate
@@ -64,6 +65,7 @@ def create_app(start_mt5=True):
         error_bp,
         control_bp,
         metrics_bp,
+        mcp_bp,
     ):
         application.register_blueprint(blueprint)
     application.wsgi_app = ProxyFix(application.wsgi_app, x_proto=1, x_host=1)
