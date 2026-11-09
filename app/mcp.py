@@ -227,5 +227,18 @@ def mcp_endpoint():
         if selected is None or not isinstance(arguments, dict):
             return _jsonrpc({"jsonrpc": "2.0", "id": request_id, "error": {"code": -32602, "message": "Unknown tool or invalid arguments"}})
         result = _invoke(selected, arguments)
-        return _jsonrpc({"jsonrpc": "2.0", "id": request_id, "result": {"content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}], "isError": "error" in result or result.get("status", 200) >= 400}})
+        is_error = "error" in result or result.get("status", 200) >= 400
+        return _jsonrpc(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {
+                    # Keep text for clients that only consume content blocks.
+                    "content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}],
+                    # Expose the actual JSON result for MCP clients and agents.
+                    "structuredContent": result,
+                    "isError": is_error,
+                },
+            }
+        )
     return _jsonrpc({"jsonrpc": "2.0", "id": request_id, "error": {"code": -32601, "message": f"Method not found: {method}"}})

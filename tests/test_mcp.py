@@ -66,6 +66,7 @@ def test_mcp_delegates_to_existing_http_route(monkeypatch):
     delegated = json.loads(result["content"][0]["text"])
     assert delegated["status"] == 200
     assert delegated["data"]["ok"] is True
+    assert result["structuredContent"] == delegated
 
 
 def test_mcp_rejects_unknown_tools(monkeypatch):
