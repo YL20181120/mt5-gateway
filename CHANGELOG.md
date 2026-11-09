@@ -4,6 +4,75 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-05
+
+### Documentation
+
+- The docs site shows a sponsor bar (readers can close it) and a footer link to GitHub Sponsors. No
+  code changes.
+
+## [0.4.0] - 2026-11-02
+
+### Added
+
+- A headless image (`headless`, `X.Y.Z-headless`) with no browser desktop. It uses the same
+  API and `/config` volume as the VNC image, and restarts the API if it crashes.
+
+- An MT5 attestation: `attestation/run.py` tests an image against a real demo account, and
+  promotion to `main` requires a passing record for the exact code on both images.
+
+### Changed
+
+- The VNC image is much smaller, and keeps its tags and desktop.
+- Both images bake MT5 build 6244, pinned, rather than the newest build.
+
+- The image health check allows 10 minutes for a first login, because a busy host could mark a
+  healthy boot as failed. Compose stacks that set their own `start_period` keep it.
+
+### Removed
+
+- `QKT_ARTIFACTS_TOKEN`, `QKT_ARTIFACTS_REPO` and `QKT_ARTIFACTS_FILE`. They fetched
+  `servers.dat` from a private repo only when the baked copy was missing, and it is now always
+  in the image.
+
+### Fixed
+
+- Fresh volumes work again. Images from at least 0.3.24 baked MT5 builds that stop under
+  Wine 10 with a false debugger dialog.
+- The build now fails if the baked terminal cannot start.
+- A fast boot could take about 3 minutes to log in. The API could launch its own terminal
+  before the boot's one was up, and that terminal had no login config. The API now waits.
+- MT5 `10031` now returns `502 unknown_outcome` instead of `409 retryable`. The broker's deal
+  history showed requests answered with it executing anyway, so retrying could send an order
+  twice. Repeating the same idempotency key now replays the reply instead of sending again.
+- A terminal that comes back after a crash or a boot-time outage can trade. It used to reject
+  orders with `10027` until the container restarted. The start config set MT5's `Account=1`,
+  which means "disable algo trading when connecting with a different account".
+
+## [0.3.26] - 2026-10-22
+
+### Fixed
+
+- The release build refreshes Debian packages every day instead of every week. 0.3.25 never
+  published an image: its security scan found fixed expat and libssh updates that the week-keyed
+  layer cache had not picked up. 0.3.26 carries everything listed under 0.3.25.
+
+## [0.3.25] - 2026-10-22
+
+No code changes: the image is the 0.3.24 gateway on a fresh build.
+
+### Changed
+
+- A push to main that touches only docs no longer rebuilds the image. The build installs the MT5
+  terminal fresh, so a docs-only rebuild republished the release tags with whatever terminal build
+  MetaQuotes served that day.
+- The docs deploy check verifies against GitHub Pages directly, not through Cloudflare's cache.
+
+### Documentation
+
+- Credit for the project's origins: slowfound, then Gabriel Rockson, then this fork.
+- A GitHub Sponsors link in the README.
+
 ## [0.3.24] - 2026-10-20
 
 ### Fixed
